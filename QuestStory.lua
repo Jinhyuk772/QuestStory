@@ -1,8 +1,8 @@
--- QuestStory 0.2.1: 퀘스트를 받을 때 / 완료할 때 한국어 세 줄 이야기 팝업.
+-- QuestStory 0.2.2: 퀘스트를 받을 때 / 완료할 때 한국어 세 줄 이야기 팝업.
 -- 일반 프레임만 씀 (보안 프레임·후킹 없음 = taint 없음). OnUpdate 는 팝업이 보일 때만 돈다.
 -- 데이터: Data.lua 의 QuestStoryData (없어도 동작: 제목 + 목표만 보여 줌).
 local ADDON = "QuestStory"
-local VERSION = "0.2.1"
+local VERSION = "0.2.2"
 QuestStory = QuestStory or {}
 local QS = QuestStory
 QS.queue = {}          -- 대기 중인 팝업 (FIFO)
