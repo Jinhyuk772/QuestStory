@@ -1,4 +1,4 @@
--- QuestStory 0.1.0: 퀘스트를 받을 때 / 완료할 때 한국어 세 줄 이야기 팝업.
+-- QuestStory 0.1.1: 퀘스트를 받을 때 / 완료할 때 한국어 세 줄 이야기 팝업.
 -- 일반 프레임만 씀 (보안 프레임·후킹 없음 = taint 없음). OnUpdate 는 팝업이 보일 때만 돈다.
 -- 데이터: Data.lua 의 QuestStoryData (없어도 동작: 제목 + 목표만 보여 줌).
 local ADDON = "QuestStory"
@@ -150,9 +150,12 @@ local function buildDone(id)
   if d.nx then
     nxt = apiTitle(d.nx) or str(d.nt)
   end
+  -- 완료 뒤 이야기가 없는 퀘스트는 받을 때 이야기를 다시 보여 줌 (0.1.1: 완료 때 아무것도 안 뜨던 것)
+  local label = "그 뒤 이야기"
+  if not lines then lines = copyLines(d.a); label = "이런 이야기였어요" end
   if not lines and not d.nx then return nil end
   local title = titleFor(id) or apiTitle(id) or "퀘스트"
-  return {kind = "done", id = id, title = title, lines = lines, label = "그 뒤 이야기",
+  return {kind = "done", id = id, title = title, lines = lines, label = label,
           nextTitle = nxt, tag = "퀘스트 완료"}
 end
 
@@ -373,12 +376,27 @@ local function onDetail()
   e.title = str(try(GetTitleText)) or e.title
   e.obj = str(try(GetObjectiveText)) or e.obj
 end
+local doneAt = {}       -- [questID] = GetTime() (완료 창 중복 거르기)
+local pendingDone      -- 보상 창이 열린 퀘스트 (QUEST_TURNED_IN 이 안 올 때 대비)
+local function pushDone(id)
+  if type(id) ~= "number" or id <= 0 then return end
+  local t = now()
+  if doneAt[id] and t - doneAt[id] < 5 then return end
+  doneAt[id] = t
+  if pendingDone == id then pendingDone = nil end
+  QS.Enqueue(buildDone(id))
+end
 local function onComplete()
   local id = try(GetQuestID)
   if type(id) ~= "number" or id <= 0 then return end
   local e = cache[id] or {}
   cache[id] = e
   e.title = str(try(GetTitleText)) or e.title
+  pendingDone = id
+end
+-- QUEST_TURNED_IN 이 안 오는 클라이언트 대비: 보상 창이 열렸던 퀘스트가 목록에서 빠지면 완료로 봄
+local function onRemoved(id)
+  if id and id == pendingDone then pushDone(id) end
 end
 local function onAccepted(a, b)
   local id = b or a
@@ -397,8 +415,7 @@ local function onAccepted(a, b)
   QS.Enqueue(buildAccept(id, title, obj))
 end
 local function onTurnedIn(id)
-  if type(id) ~= "number" then return end
-  QS.Enqueue(buildDone(id))
+  pushDone(id)
 end
 
 local handlers = {
@@ -412,6 +429,7 @@ local handlers = {
   QUEST_ACCEPTED = onAccepted,
   QUEST_COMPLETE = onComplete,
   QUEST_TURNED_IN = onTurnedIn,
+  QUEST_REMOVED = onRemoved,
 }
 
 ui = nil
