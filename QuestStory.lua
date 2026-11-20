@@ -1,8 +1,8 @@
--- QuestStory 0.1.2: 퀘스트를 받을 때 / 완료할 때 한국어 세 줄 이야기 팝업.
+-- QuestStory 0.1.3: 퀘스트를 받을 때 / 완료할 때 한국어 세 줄 이야기 팝업.
 -- 일반 프레임만 씀 (보안 프레임·후킹 없음 = taint 없음). OnUpdate 는 팝업이 보일 때만 돈다.
 -- 데이터: Data.lua 의 QuestStoryData (없어도 동작: 제목 + 목표만 보여 줌).
 local ADDON = "QuestStory"
-local VERSION = "0.1.2"
+local VERSION = "0.1.3"
 QuestStory = QuestStory or {}
 local QS = QuestStory
 QS.queue = {}          -- 대기 중인 팝업 (FIFO)
@@ -207,7 +207,11 @@ local function build()
   f.nextLine = fs(fB, GOLD)
   f.footer = fs(fS, FOOT)
 
-  f:SetScript("OnUpdate", function(self, elapsed) QS.OnUpdate(elapsed) end)
+  local updErr
+  f:SetScript("OnUpdate", function(self, elapsed)
+    local ok, err = pcall(QS.OnUpdate, elapsed)
+    if not ok and not updErr then updErr = true; say("창 갱신 중 오류: " .. tostring(err)) end
+  end)
   f:SetScript("OnMouseUp", function(self, button)
     if QS.moveMode then return end
     if button == "RightButton" then QS.DismissAll() else QS.Advance() end
@@ -318,9 +322,11 @@ function QS.Show(p)
   QS.current = p
   QS.t = 0
   burstPos = burstPos + 1
-  render(p)
-  ui:SetAlpha(0)
+  local ok, err = pcall(render, p)
+  if not ok then say("창을 그리다 오류: " .. tostring(err)) end
+  ui:SetAlpha(1)
   ui:Show()
+  if not try(ui.IsVisible, ui) then say("창을 띄웠는데 화면에 안 보여요. /qs 상태 를 알려 주세요.") end
   if not p.sample and not p.move then
     initDB().last = {kind = p.kind, id = p.id, title = p.title, obj = p.obj}
   end
@@ -341,7 +347,10 @@ function QS.Enqueue(p)
   if not QS.current and #QS.queue == 0 then burstTotal, burstPos = 0, 0 end
   burstTotal = burstTotal + 1
   QS.queue[#QS.queue + 1] = p
-  if not QS.current then QS.Advance() else QS.RefreshCounter() end
+  if not QS.current then
+    local ok, err = pcall(QS.Advance)
+    if not ok then say("창을 띄우다 오류: " .. tostring(err)) end
+  else QS.RefreshCounter() end
   return true
 end
 
@@ -360,8 +369,7 @@ function QS.OnUpdate(elapsed)
   QS.t = QS.t + (elapsed or 0)
   local t = QS.t
   if t >= hold + FADE_OUT then QS.Advance() return end
-  if t < FADE_IN then ui:SetAlpha(t / FADE_IN)
-  elseif t <= hold then ui:SetAlpha(1)
+  if t <= hold then ui:SetAlpha(1)
   else ui:SetAlpha((hold + FADE_OUT - t) / FADE_OUT) end
 end
 
@@ -392,7 +400,9 @@ local function pushDone(id)
   if doneAt[id] and t - doneAt[id] < 5 then return end
   doneAt[id] = t
   if pendingDone == id then pendingDone = nil end
-  QS.Enqueue(buildDone(id))
+  local p = buildDone(id)
+  if not p and isOn() then say("완료: 이야기가 없는 퀘스트예요 (번호 " .. id .. ")") end
+  QS.Enqueue(p)
 end
 local function onComplete()
   local id = try(GetQuestID)
@@ -416,11 +426,15 @@ local function onAccepted(a, b)
   if (not title or not obj) and C_Timer and C_Timer.After then
     C_Timer.After(0.3, function()
       local t2, o2 = gather(id)
-      QS.Enqueue(buildAccept(id, t2, o2))
+      local p = buildAccept(id, t2, o2)
+      if not p and isOn() then say("수락: 이야기가 없는 퀘스트예요 (번호 " .. id .. ")") end
+      QS.Enqueue(p)
     end)
     return
   end
-  QS.Enqueue(buildAccept(id, title, obj))
+  local p = buildAccept(id, title, obj)
+  if not p and isOn() then say("수락: 이야기가 없는 퀘스트예요 (번호 " .. id .. ")") end
+  QS.Enqueue(p)
 end
 local function onTurnedIn(id)
   pushDone(id)
@@ -459,7 +473,10 @@ ev:SetScript("OnEvent", function(self, event, a, b, ...)
   seen[event] = (seen[event] or 0) + 1
   if event:find("^QUEST_") then lastEv = event .. " " .. tostring(a) .. " " .. tostring(b) end
   local h = handlers[event]
-  if h then h(a, b, ...) end
+  if h then
+    local ok, err = pcall(h, a, b, ...)
+    if not ok then say(event .. " 처리 중 오류: " .. tostring(err)) end
+  end
 end)
 function QS.Status()
   say("버전 " .. VERSION .. " · " .. (isOn() and "켜짐" or "꺼짐") .. " · 이야기 " .. dataCount() .. "개 · 언어 " .. tostring(try(GetLocale)))
@@ -469,6 +486,13 @@ function QS.Status()
   end
   print("  받은 신호: " .. table.concat(parts, " · "))
   print("  마지막 신호: " .. (lastEv or "없음"))
+  if ui then
+    local x, y = try(ui.GetCenter, ui)
+    print("  창: " .. (try(ui.IsShown, ui) and "켜짐" or "꺼짐") .. " · 보임 " .. tostring(try(ui.IsVisible, ui) and true or false)
+      .. " · 투명도 " .. tostring(try(ui.GetAlpha, ui)) .. " · 배율 " .. tostring(try(ui.GetEffectiveScale, ui))
+      .. " · 위치 " .. tostring(x and math.floor(x)) .. "," .. tostring(y and math.floor(y))
+      .. " · 화면 " .. tostring(try(GetScreenWidth) and math.floor(GetScreenWidth())) .. "x" .. tostring(try(GetScreenHeight) and math.floor(GetScreenHeight())))
+  end
   local l = QuestStoryDB and QuestStoryDB.last
   if type(l) == "table" then print("  마지막 창: " .. tostring(l.kind) .. " " .. tostring(l.id) .. " " .. tostring(l.title)) end
 end
