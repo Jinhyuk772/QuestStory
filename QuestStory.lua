@@ -1,17 +1,19 @@
--- QuestStory 0.2.2: 퀘스트를 받을 때 / 완료할 때 한국어 세 줄 이야기 팝업.
--- 일반 프레임만 씀 (보안 프레임·후킹 없음 = taint 없음). OnUpdate 는 팝업이 보일 때만 돈다.
+-- QuestStory 0.3.0: 퀘스트를 받을 때 / 완료할 때 한국어 세 줄 이야기 팝업.
+-- 저절로 사라지지 않음: 줄이기(–) / 닫기(×) 로 직접. 새 퀘스트가 잡히면 줄여 둔 창도 다시 펼쳐짐.
+-- 일반 프레임만 씀 (보안 프레임·후킹 없음 = taint 없음). OnUpdate 는 페이드 인·자동 줄이기 때만 돈다.
 -- 데이터: Data.lua 의 QuestStoryData (없어도 동작: 제목 + 목표만 보여 줌).
 local ADDON = "QuestStory"
-local VERSION = "0.2.2"
+local VERSION = "0.3.0"
 QuestStory = QuestStory or {}
 local QS = QuestStory
-QS.queue = {}          -- 대기 중인 팝업 (FIFO)
-QS.current = nil       -- 화면에 떠 있는 팝업
-QS.moveMode = false
-QS.t = 0               -- 현재 팝업이 보인 시간(초, 호버 중엔 멈춤)
+QS.history = QS.history or {}   -- 이번 접속에서 본 팝업들 (새것이 뒤, 최대 HIST_MAX)
+QS.index = 0                    -- 지금 보이는 것의 순번
+QS.current = nil                -- 지금 보이는 팝업
 
 local W, PAD = 440, 14
-local FADE_IN, FADE_OUT = 0.25, 0.6
+local FADE_IN = 0.25
+local MINW, MINH = 260, 26
+local HIST_MAX = 20
 local PFX = "|cffffd24a[QuestStory]|r "
 local FONT_FILES = {
   "Interface\\AddOns\\QuestStory\\Fonts\\2002.ttf",
@@ -28,7 +30,8 @@ local FOOT = {0.5, 0.48, 0.44}
 
 local cache = {}       -- [questID] = {title=, obj=}  (QUEST_DETAIL / QUEST_COMPLETE 에서 채움)
 local recent = {}      -- [questID] = GetTime() (중복 QUEST_ACCEPTED 거르기)
-local burstTotal, burstPos = 0, 0
+local fading, fadeT, autoT = false, 0, 0
+local dragging, dragEnd = false, -100
 local ui
 
 local function say(msg) print(PFX .. msg) end
@@ -166,6 +169,14 @@ local function buildDone(id, always)
 end
 
 -- ---------- UI ----------
+local function isMin() local d = QuestStoryDB; return d ~= nil and d.min == true end
+local function autoSecs()
+  local d = QuestStoryDB
+  local a = d and d.auto
+  if type(a) == "number" and a > 0 then return a end
+  return 0
+end
+
 local function build()
   local fT = mkFont("QuestStoryFontTitle", 16, "GameFontNormalLarge")
   local fB = mkFont("QuestStoryFontBody", 13, "GameFontHighlight")
@@ -176,7 +187,7 @@ local function build()
   f:SetWidth(W); f:SetHeight(120)
   f:SetClampedToScreen(true)
   f:EnableMouse(true)
-  f:SetPoint("RIGHT", UIParent, "RIGHT", -60, 80)
+  f:SetPoint("TOPRIGHT", UIParent, "RIGHT", -60, 220)
   f:Hide()
   local bg = f:CreateTexture(nil, "BACKGROUND")
   bg:SetAllPoints(f); bg:SetColorTexture(0.06, 0.05, 0.04, 0.92)
@@ -194,15 +205,15 @@ local function build()
   f.accent:SetHeight(3); f.accent:SetColorTexture(GOLD[1], GOLD[2], GOLD[3], 1)
   f.divider = f:CreateTexture(nil, "ARTWORK")
   f.divider:SetHeight(1); f.divider:SetColorTexture(0.45, 0.36, 0.2, 0.35)
-  local function fs(font, col)
-    local s = f:CreateFontString(nil, "OVERLAY")
+  local function fs(font, col, parent)
+    local s = (parent or f):CreateFontString(nil, "OVERLAY")
     s:SetFontObject(font); s:SetJustifyH("LEFT"); s:SetJustifyV("TOP")
     if s.SetNonSpaceWrap then s:SetNonSpaceWrap(true) end
     s:SetTextColor(col[1], col[2], col[3])
     return s
   end
   f.tag = fs(fS, GOLD)
-  f.counter = fs(fS, MUTED); f.counter:SetJustifyH("RIGHT")
+  f.counter = fs(fS, MUTED); f.counter:SetJustifyH("CENTER"); f.counter:SetWidth(40)
   f.title = fs(fT, WARM)
   f.objLabel = fs(fS, MUTED); f.objLabel:SetText("목표")
   f.objText = fs(fB, DIM)
@@ -212,21 +223,58 @@ local function build()
   f.nextLine = fs(fB, GOLD)
   f.footer = fs(fS, FOOT)
 
-  local updErr
-  f:SetScript("OnUpdate", function(self, elapsed)
-    local ok, err = pcall(QS.OnUpdate, elapsed)
-    if not ok and not updErr then updErr = true; say("창 갱신 중 오류: " .. tostring(err)) end
-  end)
+  -- 줄인 상태(작은 막대)용: 색 점 + 한 줄 제목
+  f.dot = f:CreateTexture(nil, "ARTWORK")
+  f.dot:SetWidth(8); f.dot:SetHeight(8); f.dot:SetColorTexture(GOLD[1], GOLD[2], GOLD[3], 1)
+  f.dot:ClearAllPoints(); f.dot:SetPoint("LEFT", f, "LEFT", 9, -1)
+  f.minTitle = fs(fB, WARM); f.minTitle:SetJustifyV("MIDDLE")
+  if f.minTitle.SetWordWrap then f.minTitle:SetWordWrap(false) end
+  f.minTitle:SetWidth(MINW - 22 - 30)
+  f.minTitle:ClearAllPoints(); f.minTitle:SetPoint("LEFT", f, "LEFT", 22, -1)
+
+  -- 머리 단추 (일반 Button + 글자)
+  local function mkBtn(label, font, point, x, y, onClick)
+    local b = CreateFrame("Button", nil, f)
+    b:SetWidth(18); b:SetHeight(18)
+    b:ClearAllPoints(); b:SetPoint(point, f, point, x, y)
+    local t = b:CreateFontString(nil, "OVERLAY")
+    t:SetFontObject(font); t:SetJustifyH("CENTER")
+    t:SetPoint("CENTER", b, "CENTER", 0, 0)
+    t:SetText(label); t:SetTextColor(MUTED[1], MUTED[2], MUTED[3])
+    b.text = t
+    b:SetScript("OnClick", function(self) if not self.off then onClick() end end)
+    b:SetScript("OnEnter", function(self) if not self.off then self.text:SetTextColor(1, 0.95, 0.7) end end)
+    b:SetScript("OnLeave", function(self)
+      local c = self.off and FOOT or MUTED
+      self.text:SetTextColor(c[1], c[2], c[3])
+    end)
+    return b
+  end
+  f.btnClose = mkBtn("×", fB, "TOPRIGHT", -6, -8, function() QS.Close() end)
+  f.btnMin = mkBtn("–", fB, "TOPRIGHT", -26, -8, function() QS.SetMin(true) end)
+  f.btnNext = mkBtn("▶", fS, "TOPRIGHT", -48, -8, function() QS.Step(1) end)
+  f.counter:ClearAllPoints(); f.counter:SetPoint("TOPRIGHT", f, "TOPRIGHT", -68, -13)
+  f.btnPrev = mkBtn("◀", fS, "TOPRIGHT", -108, -8, function() QS.Step(-1) end)
+  f.btnMax = mkBtn("+", fB, "RIGHT", -4, -1, function() QS.SetMin(false) end)
+
   f:SetScript("OnMouseUp", function(self, button)
-    if QS.moveMode then return end
-    if button == "RightButton" then QS.DismissAll() else QS.Advance() end
+    if dragging or now() - dragEnd < 0.25 then return end   -- 끌고 난 직후의 클릭은 무시
+    if isMin() then
+      if button == "LeftButton" then QS.SetMin(false) end
+    elseif button == "RightButton" then
+      QS.SetMin(true)
+    end
   end)
+  if f.SetMovable then f:SetMovable(true) end
+  if f.RegisterForDrag then f:RegisterForDrag("LeftButton") end
   f:SetScript("OnDragStart", function(self)
-    if QS.moveMode and self.StartMoving then self:StartMoving() end
+    dragging = true
+    if self.StartMoving then self:StartMoving() end
   end)
   f:SetScript("OnDragStop", function(self)
     if self.StopMovingOrSizing then self:StopMovingOrSizing() end
-    if QS.moveMode then QS.SavePos() end
+    dragging = false; dragEnd = now()
+    QS.SavePos()
   end)
   return f
 end
@@ -248,11 +296,15 @@ local function applyPos()
     ui:SetPoint(p[1], UIParent, type(p[2]) == "string" and p[2] or p[1], tonumber(p[3]) or 0, tonumber(p[4]) or 0)
   end
 end
+-- 오른쪽 위 모서리를 기준으로 저장 (줄이거나 펼쳐도 그 모서리는 그대로)
 function QS.SavePos()
   if not ui then return end
-  local point, _, rel, x, y = ui:GetPoint(1)
-  if not point then return end
-  initDB().pos = {point, rel or point, x or 0, y or 0}
+  local r = try(ui.GetRight, ui)
+  local t = try(ui.GetTop, ui)
+  if type(r) ~= "number" or type(t) ~= "number" then return end
+  ui:ClearAllPoints()
+  ui:SetPoint("TOPRIGHT", UIParent, "BOTTOMLEFT", r, t)
+  initDB().pos = {"TOPRIGHT", "BOTTOMLEFT", r, t}
 end
 
 local function setText(s, text)
@@ -264,10 +316,40 @@ local function place(s, y)
   return y + hOf(s)
 end
 
+local function setBtnOff(b, off)
+  b.off = off and true or false
+  local c = off and FOOT or MUTED
+  b.text:SetTextColor(c[1], c[2], c[3])
+end
+function QS.RefreshCounter()
+  if not ui then return end
+  local n = #QS.history
+  if n > 1 and not isMin() then
+    ui.counter:SetText(QS.index .. "/" .. n); ui.counter:Show()
+    ui.btnPrev:Show(); ui.btnNext:Show()
+    setBtnOff(ui.btnPrev, QS.index <= 1); setBtnOff(ui.btnNext, QS.index >= n)
+  else
+    ui.counter:SetText(""); ui.counter:Hide()
+    ui.btnPrev:Hide(); ui.btnNext:Hide()
+  end
+end
+
 local function render(p)
   local f = ui
   local col = (p.kind == "done") and GREEN or GOLD
   f.accent:SetColorTexture(col[1], col[2], col[3], 1)
+  f.dot:SetColorTexture(col[1], col[2], col[3], 1)
+  f.minTitle:SetText(p.title or "퀘스트")
+  if isMin() then
+    for _, r in ipairs({f.tag, f.counter, f.title, f.objLabel, f.objText, f.storyLabel, f.lines[1], f.lines[2],
+        f.lines[3], f.nextLine, f.footer, f.divider, f.btnMin, f.btnClose, f.btnPrev, f.btnNext}) do r:Hide() end
+    f.dot:Show(); f.minTitle:Show(); f.btnMax:Show()
+    f:SetWidth(MINW); f:SetHeight(MINH)
+    return
+  end
+  f.dot:Hide(); f.minTitle:Hide(); f.btnMax:Hide()
+  f.btnMin:Show(); f.btnClose:Show(); f.divider:Show()
+  f:SetWidth(W)
   f.tag:SetTextColor(col[1], col[2], col[3])
   f.tag:SetText(p.tag or ""); f.tag:Show()
   f.title:SetText(p.title or "퀘스트"); f.title:SetWidth(W - 2 * PAD); f.title:Show()
@@ -279,13 +361,12 @@ local function render(p)
     setText(f.lines[i], l and ("· " .. l) or nil)
   end
   setText(f.nextLine, p.nextTitle and ("다음 이야기: " .. p.nextTitle) or nil)
-  f.footer:SetText(QS.moveMode and "드래그해서 옮긴 뒤 /qs move 로 고정" or "클릭하면 닫혀요")
+  f.footer:SetText("– 줄이기 · × 닫기 · 드래그로 이동")
   f.footer:SetWidth(W - 2 * PAD); f.footer:Show()
   QS.RefreshCounter()
   -- 배치
   local y = 13
   f.tag:ClearAllPoints(); f.tag:SetPoint("TOPLEFT", f, "TOPLEFT", PAD, -y)
-  f.counter:ClearAllPoints(); f.counter:SetPoint("TOPRIGHT", f, "TOPRIGHT", -PAD, -y)
   y = y + 17
   y = place(f.title, y) + 8
   f.divider:ClearAllPoints()
@@ -305,100 +386,124 @@ local function render(p)
   f:SetHeight(y + PAD - 4)
 end
 
-function QS.RefreshCounter()
+-- ---------- OnUpdate: 페이드 인 · (선택) 자동 줄이기 때만 돈다 ----------
+local ticking = false
+local function wantTick()
+  if fading then return true end
+  return autoSecs() > 0 and ui ~= nil and not isMin() and ui:IsShown() and true or false
+end
+local function ticker()
   if not ui then return end
-  if burstTotal > 1 then ui.counter:SetText(burstPos .. "/" .. burstTotal); ui.counter:Show()
-  else ui.counter:SetText(""); ui.counter:Hide() end
-end
-
--- ---------- 큐 ----------
-local function visibleChars(p)
-  local n = ulen(p.title or "") + ulen(p.obj or "") + ulen(p.nextTitle or "")
-  for _, l in ipairs(p.lines or {}) do n = n + ulen(l) end
-  return n
-end
-local function holdFor(p)
-  local h = 4 + 0.09 * visibleChars(p)
-  if h < 8 then h = 8 elseif h > 15 then h = 15 end
-  return h
-end
-
-function QS.Show(p)
-  QS.current = p
-  QS.t = 0
-  burstPos = burstPos + 1
-  local ok, err = pcall(render, p)
-  if not ok then say("창을 그리다 오류: " .. tostring(err)) end
-  ui:SetAlpha(1)
-  ui:Show()
-  if not try(ui.IsVisible, ui) then say("창을 띄웠는데 화면에 안 보여요. /qs 상태 를 알려 주세요.") end
-  if not p.sample and not p.move then
-    initDB().last = {kind = p.kind, id = p.id, title = p.title, obj = p.obj}
+  local want = wantTick()
+  if want == ticking then return end
+  ticking = want
+  if want then
+    local updErr
+    ui:SetScript("OnUpdate", function(self, elapsed)
+      local ok, err = pcall(QS.OnUpdate, elapsed)
+      if not ok and not updErr then updErr = true; say("창 갱신 중 오류: " .. tostring(err)) end
+    end)
+  else
+    ui:SetScript("OnUpdate", nil)
   end
 end
-function QS.Advance()
-  local nxt = table.remove(QS.queue, 1)
-  if nxt then QS.Show(nxt) else QS.current = nil; if ui then ui:Hide() end end
-end
-function QS.DismissAll()
-  for i = #QS.queue, 1, -1 do QS.queue[i] = nil end
-  burstTotal = burstPos
-  QS.current = nil
-  if ui then ui:Hide() end
-end
-function QS.Enqueue(p)
-  if not p or not isOn() then return false end
-  p.hold = holdFor(p)
-  if not QS.current and #QS.queue == 0 then burstTotal, burstPos = 0, 0 end
-  burstTotal = burstTotal + 1
-  QS.queue[#QS.queue + 1] = p
-  if not QS.current then
-    local ok, err = pcall(QS.Advance)
-    if not ok then say("창을 띄우다 오류: " .. tostring(err)) end
-  else QS.RefreshCounter() end
-  return true
-end
-
--- 대화 창이 열리는 순간 바로 보여 줌: 떠 있던 것·대기 중인 것은 치우고 이것으로 바꿈
--- (한 NPC 가 퀘스트를 두세 개 연달아 줄 때 창이 밀리지 않게)
-function QS.ShowNow(p)
-  if not p or not isOn() or QS.moveMode then return false end
-  p.hold = holdFor(p)
-  for i = #QS.queue, 1, -1 do QS.queue[i] = nil end
-  burstTotal, burstPos = 1, 0
-  local ok, err = pcall(QS.Show, p)
-  if not ok then say("창을 띄우다 오류: " .. tostring(err)) end
-  return true
-end
-
 function QS.OnUpdate(elapsed)
-  local p = QS.current
-  if not p then if ui then ui:Hide() end return end
-  if QS.moveMode then ui:SetAlpha(1) return end
-  if QS.pin and p.id == QS.pin then QS.t = 0; ui:SetAlpha(1) return end   -- 그 퀘스트 대화 창이 열려 있는 동안은 계속 보임
-  local hold = p.hold or 8
-  if #QS.queue > 0 and hold > 6 then hold = 6 end
-  local over = try(ui.IsMouseOver, ui)
-  if over then
-    if QS.t > hold then QS.t = hold end
-    ui:SetAlpha(1)
-    return
+  elapsed = elapsed or 0
+  if ui and ui:IsShown() then
+    if fading then
+      fadeT = fadeT + elapsed
+      if fadeT >= FADE_IN then fading = false; ui:SetAlpha(1) else ui:SetAlpha(fadeT / FADE_IN) end
+    end
+    local a = autoSecs()
+    if a > 0 and not isMin() then
+      if QS.pin or try(ui.IsMouseOver, ui) then autoT = 0
+      else
+        autoT = autoT + elapsed
+        if autoT >= a then QS.SetMin(true) end
+      end
+    end
+  else
+    fading = false
   end
-  QS.t = QS.t + (elapsed or 0)
-  local t = QS.t
-  if t >= hold + FADE_OUT then QS.Advance() return end
-  if t <= hold then ui:SetAlpha(1)
-  else ui:SetAlpha((hold + FADE_OUT - t) / FADE_OUT) end
+  ticker()
+end
+
+-- ---------- 기록 · 보이기 ----------
+local function display()
+  local ok, err = pcall(render, QS.current)
+  if not ok then say("창을 그리다 오류: " .. tostring(err)) end
+end
+local function reveal()
+  local was = ui:IsShown()
+  autoT = 0
+  if not was then fading = true; fadeT = 0; ui:SetAlpha(0) else ui:SetAlpha(1) end
+  ui:Show()
+  ticker()
+  if not try(ui.IsVisible, ui) then say("창을 띄웠는데 화면에 안 보여요. /qs 상태 를 알려 주세요.") end
+end
+
+-- 새 팝업: 기록에 붙이고 바로 펼쳐서 보여 줌 (줄여 뒀거나 닫아 뒀어도)
+function QS.Present(p)
+  if not p or not isOn() then return false end
+  local d = initDB()
+  local h = QS.history
+  local last = h[#h]
+  if last and last.kind == p.kind and last.id == p.id and last.tag == p.tag and not p.sample and not last.sample then
+    h[#h] = p      -- 같은 퀘스트 창을 다시 연 것: 새로 쌓지 않고 바꿈
+  else
+    h[#h + 1] = p
+    while #h > HIST_MAX do table.remove(h, 1) end
+  end
+  QS.index = #h
+  QS.current = p
+  d.min = false
+  display()
+  reveal()
+  if not p.sample then
+    d.last = {kind = p.kind, id = p.id, title = p.title, obj = p.obj}
+  end
+  return true
+end
+
+function QS.Goto(i)
+  if type(i) ~= "number" or i < 1 or i > #QS.history then return false end
+  QS.index = i
+  QS.current = QS.history[i]
+  autoT = 0
+  display()
+  return true
+end
+function QS.Step(dir)
+  return QS.Goto(QS.index + dir)
+end
+function QS.SetMin(v)
+  local d = initDB()
+  d.min = v and true or false
+  autoT = 0
+  if QS.current then display() end
+  ticker()
+end
+function QS.Close()
+  if ui then ui:Hide() end
+  fading = false
+  ticker()
+end
+function QS.Open()   -- 지금 보던 것을 펼쳐서 다시 보여 줌
+  if not (QS.current and ui) then return false end
+  initDB().min = false
+  display()
+  reveal()
+  return true
 end
 
 -- 공개: kind "accept"|"done", 캐시/로그에서 내용을 모아 큐에 넣음
 function QS.Push(kind, id, title, obj)
-  if kind == "done" then return QS.Enqueue(buildDone(id)) end
+  if kind == "done" then return QS.Present(buildDone(id)) end
   if not title or not obj then
     local t2, o2 = gather(id)
     title, obj = title or t2, obj or o2
   end
-  return QS.Enqueue(buildAccept(id, title, obj))
+  return QS.Present(buildAccept(id, title, obj))
 end
 
 -- ---------- 이벤트 ----------
@@ -421,7 +526,7 @@ local function onDetail()
   e.title = str(try(GetTitleText)) or e.title
   e.obj = str(try(GetObjectiveText)) or e.obj
   -- 0.2.0: 수락을 누르기 전, 퀘스트 내용 창이 열릴 때 바로 보여 줌
-  if QS.ShowNow(buildAccept(id, e.title, e.obj)) then recent[id] = now(); QS.pin = id end
+  if QS.Present(buildAccept(id, e.title, e.obj)) then recent[id] = now(); QS.pin = id end
 end
 local doneAt = {}       -- [questID] = GetTime() (완료 창 중복 거르기)
 local pendingDone      -- 보상 창이 열린 퀘스트 (QUEST_TURNED_IN 이 안 올 때 대비)
@@ -431,7 +536,7 @@ local function pushDone(id)
   if pendingDone == id then pendingDone = nil end
   if doneAt[id] and t - doneAt[id] < 120 then return end   -- 보상 창에서 이미 보여 줬으면 다시 안 띄움
   doneAt[id] = t
-  QS.Enqueue(buildDone(id))
+  QS.Present(buildDone(id))
 end
 local function onComplete()
   local id = dialogQuestID()
@@ -441,7 +546,7 @@ local function onComplete()
   e.title = str(try(GetTitleText)) or e.title
   pendingDone = id
   -- 0.2.0: 보상을 받기 전, 완료(보상) 창이 열릴 때 바로 보여 줌
-  if QS.ShowNow(buildDone(id, true)) then doneAt[id] = now(); QS.pin = id end
+  if QS.Present(buildDone(id, true)) then doneAt[id] = now(); QS.pin = id end
 end
 -- 0.2.1: 진행 창(목표 확인 · "계속" 단추가 있는 창). 목표를 다 채웠으면 완료 이야기, 아니면 받을 때 이야기를 다시
 local function onProgress()
@@ -460,9 +565,9 @@ local function onProgress()
     p = buildAccept(id, e.title, obj)
     if p then p.tag = "진행 중인 퀘스트"; recent[id] = now() end
   end
-  if QS.ShowNow(p) then QS.pin = id end
+  if QS.Present(p) then QS.pin = id end
 end
-local function onFinished() QS.pin = nil end   -- 대화 창이 닫힘: 이제부터 시간이 가고 저절로 사라짐
+local function onFinished() QS.pin = nil; autoT = 0 end   -- 대화 창이 닫힘: (자동 줄이기를 켰다면) 이제부터 시간이 감
 -- QUEST_TURNED_IN 이 안 오는 클라이언트 대비: 보상 창이 열렸던 퀘스트가 목록에서 빠지면 완료로 봄
 local function onRemoved(id)
   if id and id == pendingDone then pushDone(id) end
@@ -477,14 +582,36 @@ local function onAccepted(a, b)
   if (not title or not obj) and C_Timer and C_Timer.After then
     C_Timer.After(0.3, function()
       local t2, o2 = gather(id)
-      QS.Enqueue(buildAccept(id, t2, o2))
+      QS.Present(buildAccept(id, t2, o2))
     end)
     return
   end
-  QS.Enqueue(buildAccept(id, title, obj))
+  QS.Present(buildAccept(id, title, obj))
 end
 local function onTurnedIn(id)
   pushDone(id)
+end
+
+local function rebuildLast(l)
+  if type(l) ~= "table" then return nil end
+  if l.kind == "done" then
+    cache[l.id or 0] = cache[l.id or 0] or {title = l.title}
+    local p = buildDone(l.id)
+    if p then p.title = l.title or p.title end
+    return p
+  end
+  return buildAccept(l.id, l.title, l.obj)
+end
+-- /reload 뒤: 마지막 이야기를 줄인 상태로 올려 둠 (새로 잡힌 퀘스트가 아니므로 펼치지 않음)
+function QS.RestoreLast()
+  if not ui or #QS.history > 0 or not isOn() then return end
+  local d = QuestStoryDB
+  local p = d and rebuildLast(d.last)
+  if not p then return end
+  QS.history = {p}; QS.index = 1; QS.current = p
+  d.min = true
+  display()
+  reveal()
 end
 
 local handlers = {
@@ -493,6 +620,7 @@ local handlers = {
     initDB()
     if not ui then build() end
     applyPos()
+    QS.RestoreLast()
   end,
   QUEST_DETAIL = onDetail,
   QUEST_ACCEPTED = onAccepted,
@@ -557,34 +685,15 @@ local SAMPLE_C = {kind = "done", sample = true, id = 0, tag = "퀘스트 완료"
   nextTitle = "[샘플] 대장장이의 칼"}
 local function copyTable(t) local o = {}; for k, v in pairs(t) do o[k] = v end return o end
 
-function QS.ToggleMove()
-  if QS.moveMode then
-    QS.SavePos()
-    QS.moveMode = false
-    if ui.SetMovable then ui:SetMovable(false) end
-    if ui.RegisterForDrag then ui:RegisterForDrag() end
-    QS.current = nil
-    QS.Advance()
-    say("위치를 저장했어요.")
-  else
-    QS.moveMode = true
-    if QS.current and not QS.current.sample then table.insert(QS.queue, 1, QS.current) end
-    if ui.SetMovable then ui:SetMovable(true) end
-    if ui.RegisterForDrag then ui:RegisterForDrag("LeftButton") end
-    local s = copyTable(SAMPLE_A); s.move = true
-    QS.Show(s)
-    ui:SetAlpha(1)
-    say("팝업을 드래그해서 옮긴 뒤 /qs move 로 고정하세요.")
-  end
-end
-
 local function help()
   say("명령어 (/qs 또는 /queststory)")
-  print("  on / 켜기 - 켜기   off / 끄기 - 끄기")
-  print("  move / 이동 - 위치 옮기기 (다시 입력하면 고정)")
+  print("  on / 켜기 - 켜기   off / 끄기 - 끄기 (창도 닫아요)")
+  print("  min / 최소화 - 줄이기·펼치기 (창의 – 단추, 오른쪽 클릭도 같아요)")
+  print("  show / 열기 - 지금 이야기를 펼쳐서 다시 보기   last / 마지막 - 마지막 팝업 다시 띄우기")
+  print("  auto <5~120> / 자동 <초> - 그 시간 동안 마우스를 안 올리면 저절로 줄이기 (0 = 끄기)")
+  print("  move / 이동 - 샘플을 띄워 위치 잡기 (창을 드래그하면 저장돼요)")
   print("  scale <0.6~1.6> / 크기 <값> - 팝업 크기")
-  print("  last / 마지막 - 마지막 팝업 다시 보기")
-  print("  test / 테스트 - 샘플 팝업   reset / 초기화 - 위치·크기 처음으로")
+  print("  test / 테스트 - 샘플 팝업   reset / 초기화 - 위치·크기·자동 줄이기 처음으로")
   print("  status / 상태 - 버전 · 받은 신호 수 (안 뜰 때 확인용)")
 end
 
@@ -600,9 +709,10 @@ SlashCmdList["QUESTSTORY"] = function(msg)
   elseif cmd == "on" or cmd == "켜기" then
     d.on = true; say("켰어요.")
   elseif cmd == "off" or cmd == "끄기" then
-    d.on = false; QS.DismissAll(); say("껐어요. (/qs on 으로 다시 켜요)")
+    d.on = false; QS.Close(); say("껐어요. (/qs on 으로 다시 켜요)")
   elseif cmd == "move" or cmd == "이동" then
-    QS.ToggleMove()
+    local s = copyTable(SAMPLE_A); s.move = true
+    if QS.Present(s) then say("드래그해서 원하는 곳에 놓으면 저장돼요.") end
   elseif cmd == "scale" or cmd == "크기" then
     local n = tonumber(arg)
     if not n then say("크기는 0.6~1.6 사이 숫자로 적어 주세요. 예: /qs scale 1.2"); return end
@@ -611,23 +721,39 @@ SlashCmdList["QUESTSTORY"] = function(msg)
   elseif cmd == "last" or cmd == "마지막" then
     local l = d.last
     if type(l) ~= "table" then say("아직 보여 준 팝업이 없어요."); return end
-    local p
-    if l.kind == "done" then
-      cache[l.id or 0] = cache[l.id or 0] or {title = l.title}
-      p = buildDone(l.id)
-      if p then p.title = l.title or p.title end
-    else
-      p = buildAccept(l.id, l.title, l.obj)
-    end
-    if not (p and QS.Enqueue(p)) then say("다시 보여 줄 내용이 없어요.") end
+    local p = rebuildLast(l)
+    if not (p and QS.Present(p)) then say("다시 보여 줄 내용이 없어요.") end
   elseif cmd == "test" or cmd == "테스트" then
-    QS.Enqueue(copyTable(SAMPLE_A)); QS.Enqueue(copyTable(SAMPLE_C))
+    if QS.Present(copyTable(SAMPLE_A)) and QS.Present(copyTable(SAMPLE_C)) then QS.Goto(#QS.history - 1) end
+  elseif cmd == "min" or cmd == "최소화" then
+    if not QS.current then say("아직 보여 줄 이야기가 없어요."); return end
+    QS.SetMin(not isMin())
+  elseif cmd == "show" or cmd == "열기" then
+    if not isOn() then say("꺼져 있어요. /qs on 으로 켜 주세요."); return end
+    if not QS.Open() then say("아직 보여 줄 이야기가 없어요.") end
+  elseif cmd == "auto" or cmd == "자동" then
+    local n = tonumber(arg)
+    if not n then
+      say("예: /qs auto 15 (15초 뒤 저절로 줄이기), /qs auto 0 (끄기). 지금: " .. (autoSecs() > 0 and (autoSecs() .. "초") or "꺼짐"))
+      return
+    end
+    if n <= 0 then d.auto = 0
+    else
+      if n < 5 then n = 5 elseif n > 120 then n = 120 end
+      d.auto = n
+    end
+    autoT = 0; ticker()
+    if d.auto == 0 then say("자동 줄이기를 껐어요.")
+    else say("마우스를 올리지 않고 " .. d.auto .. "초가 지나면 저절로 줄어들어요.") end
   elseif cmd == "status" or cmd == "상태" then
     QS.Status()
   elseif cmd == "reset" or cmd == "초기화" then
-    d.pos = nil; d.scale = 1
-    applyScale(); ui:ClearAllPoints(); ui:SetPoint("RIGHT", UIParent, "RIGHT", -60, 80)
-    say("위치와 크기를 처음으로 되돌렸어요.")
+    d.pos = nil; d.scale = 1; d.auto = 0; d.min = false
+    applyScale(); ui:ClearAllPoints(); ui:SetPoint("TOPRIGHT", UIParent, "RIGHT", -60, 220)
+    autoT = 0
+    if QS.current then display() end
+    ticker()
+    say("위치·크기·자동 줄이기를 처음으로 되돌렸어요.")
   else
     help()
   end
