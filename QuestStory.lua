@@ -1,7 +1,8 @@
--- QuestStory 0.1.1: 퀘스트를 받을 때 / 완료할 때 한국어 세 줄 이야기 팝업.
+-- QuestStory 0.1.2: 퀘스트를 받을 때 / 완료할 때 한국어 세 줄 이야기 팝업.
 -- 일반 프레임만 씀 (보안 프레임·후킹 없음 = taint 없음). OnUpdate 는 팝업이 보일 때만 돈다.
 -- 데이터: Data.lua 의 QuestStoryData (없어도 동작: 제목 + 목표만 보여 줌).
 local ADDON = "QuestStory"
+local VERSION = "0.1.2"
 QuestStory = QuestStory or {}
 local QS = QuestStory
 QS.queue = {}          -- 대기 중인 팝업 (FIFO)
@@ -164,9 +165,9 @@ local function build()
   local fT = mkFont("QuestStoryFontTitle", 16, "GameFontNormalLarge")
   local fB = mkFont("QuestStoryFontBody", 13, "GameFontHighlight")
   local fS = mkFont("QuestStoryFontSmall", 11, "GameFontHighlightSmall")
-  local f = CreateFrame("Frame", "QuestStoryFrame", UIParent)
+  local f = CreateFrame("Frame", "QuestStoryFrame", nil)   -- 부모 없음: 대화 창이 UIParent 를 숨겨도 보임
   ui = f
-  f:SetFrameStrata("HIGH")
+  f:SetFrameStrata("FULLSCREEN_DIALOG")
   f:SetWidth(W); f:SetHeight(120)
   f:SetClampedToScreen(true)
   f:EnableMouse(true)
@@ -221,10 +222,17 @@ local function build()
   return f
 end
 
+local function applyScale()
+  if not ui then return end
+  local d = QuestStoryDB
+  local base = try(UIParent and UIParent.GetEffectiveScale, UIParent)
+  if type(base) ~= "number" or base <= 0 then base = 1 end
+  ui:SetScale(base * ((d and type(d.scale) == "number") and d.scale or 1))
+end
 local function applyPos()
   local d = QuestStoryDB
   if not ui then return end
-  if d and type(d.scale) == "number" then ui:SetScale(d.scale) end
+  applyScale()
   local p = d and d.pos
   if type(p) == "table" and type(p[1]) == "string" then
     ui:ClearAllPoints()
@@ -434,12 +442,36 @@ local handlers = {
 
 ui = nil
 build()
+local seen, lastEv = {}, nil     -- /qs 상태 용: 이벤트별 받은 횟수
+local function dataCount()
+  local d, n = QuestStoryData, 0
+  if type(d) == "table" and type(d.q) == "table" then for _ in pairs(d.q) do n = n + 1 end end
+  return n
+end
+handlers.PLAYER_LOGIN = function()
+  applyPos()
+  say(VERSION .. " 켜짐 · 이야기 " .. dataCount() .. "개 · /qs 테스트 로 창 확인")
+end
+handlers.UI_SCALE_CHANGED = function() applyScale() end
 local ev = CreateFrame("Frame")
 for name in pairs(handlers) do pcall(ev.RegisterEvent, ev, name) end
-ev:SetScript("OnEvent", function(self, event, ...)
+ev:SetScript("OnEvent", function(self, event, a, b, ...)
+  seen[event] = (seen[event] or 0) + 1
+  if event:find("^QUEST_") then lastEv = event .. " " .. tostring(a) .. " " .. tostring(b) end
   local h = handlers[event]
-  if h then h(...) end
+  if h then h(a, b, ...) end
 end)
+function QS.Status()
+  say("버전 " .. VERSION .. " · " .. (isOn() and "켜짐" or "꺼짐") .. " · 이야기 " .. dataCount() .. "개 · 언어 " .. tostring(try(GetLocale)))
+  local parts = {}
+  for _, n in ipairs({"QUEST_DETAIL", "QUEST_ACCEPTED", "QUEST_COMPLETE", "QUEST_TURNED_IN", "QUEST_REMOVED"}) do
+    parts[#parts + 1] = n:gsub("QUEST_", "") .. " " .. (seen[n] or 0)
+  end
+  print("  받은 신호: " .. table.concat(parts, " · "))
+  print("  마지막 신호: " .. (lastEv or "없음"))
+  local l = QuestStoryDB and QuestStoryDB.last
+  if type(l) == "table" then print("  마지막 창: " .. tostring(l.kind) .. " " .. tostring(l.id) .. " " .. tostring(l.title)) end
+end
 
 -- ---------- 슬래시 ----------
 local SAMPLE_A = {kind = "accept", sample = true, id = 0, tag = "새 퀘스트", label = "이야기",
@@ -480,6 +512,7 @@ local function help()
   print("  scale <0.6~1.6> / 크기 <값> - 팝업 크기")
   print("  last / 마지막 - 마지막 팝업 다시 보기")
   print("  test / 테스트 - 샘플 팝업   reset / 초기화 - 위치·크기 처음으로")
+  print("  status / 상태 - 버전 · 받은 신호 수 (안 뜰 때 확인용)")
 end
 
 SLASH_QUESTSTORY1 = "/qs"
@@ -501,7 +534,7 @@ SlashCmdList["QUESTSTORY"] = function(msg)
     local n = tonumber(arg)
     if not n then say("크기는 0.6~1.6 사이 숫자로 적어 주세요. 예: /qs scale 1.2"); return end
     if n < 0.6 then n = 0.6 elseif n > 1.6 then n = 1.6 end
-    d.scale = n; ui:SetScale(n); say("크기 " .. n .. " 로 바꿨어요.")
+    d.scale = n; applyScale(); say("크기 " .. n .. " 로 바꿨어요.")
   elseif cmd == "last" or cmd == "마지막" then
     local l = d.last
     if type(l) ~= "table" then say("아직 보여 준 팝업이 없어요."); return end
@@ -516,9 +549,11 @@ SlashCmdList["QUESTSTORY"] = function(msg)
     if not (p and QS.Enqueue(p)) then say("다시 보여 줄 내용이 없어요.") end
   elseif cmd == "test" or cmd == "테스트" then
     QS.Enqueue(copyTable(SAMPLE_A)); QS.Enqueue(copyTable(SAMPLE_C))
+  elseif cmd == "status" or cmd == "상태" then
+    QS.Status()
   elseif cmd == "reset" or cmd == "초기화" then
     d.pos = nil; d.scale = 1
-    ui:SetScale(1); ui:ClearAllPoints(); ui:SetPoint("RIGHT", UIParent, "RIGHT", -60, 80)
+    applyScale(); ui:ClearAllPoints(); ui:SetPoint("RIGHT", UIParent, "RIGHT", -60, 80)
     say("위치와 크기를 처음으로 되돌렸어요.")
   else
     help()
