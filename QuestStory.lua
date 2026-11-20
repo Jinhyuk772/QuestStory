@@ -1,8 +1,8 @@
--- QuestStory 0.1.3: 퀘스트를 받을 때 / 완료할 때 한국어 세 줄 이야기 팝업.
+-- QuestStory 0.2.0: 퀘스트를 받을 때 / 완료할 때 한국어 세 줄 이야기 팝업.
 -- 일반 프레임만 씀 (보안 프레임·후킹 없음 = taint 없음). OnUpdate 는 팝업이 보일 때만 돈다.
 -- 데이터: Data.lua 의 QuestStoryData (없어도 동작: 제목 + 목표만 보여 줌).
 local ADDON = "QuestStory"
-local VERSION = "0.1.3"
+local VERSION = "0.2.0"
 QuestStory = QuestStory or {}
 local QS = QuestStory
 QS.queue = {}          -- 대기 중인 팝업 (FIFO)
@@ -354,10 +354,23 @@ function QS.Enqueue(p)
   return true
 end
 
+-- 대화 창이 열리는 순간 바로 보여 줌: 떠 있던 것·대기 중인 것은 치우고 이것으로 바꿈
+-- (한 NPC 가 퀘스트를 두세 개 연달아 줄 때 창이 밀리지 않게)
+function QS.ShowNow(p)
+  if not p or not isOn() or QS.moveMode then return false end
+  p.hold = holdFor(p)
+  for i = #QS.queue, 1, -1 do QS.queue[i] = nil end
+  burstTotal, burstPos = 1, 0
+  local ok, err = pcall(QS.Show, p)
+  if not ok then say("창을 띄우다 오류: " .. tostring(err)) end
+  return true
+end
+
 function QS.OnUpdate(elapsed)
   local p = QS.current
   if not p then if ui then ui:Hide() end return end
   if QS.moveMode then ui:SetAlpha(1) return end
+  if QS.pin and p.id == QS.pin then QS.t = 0; ui:SetAlpha(1) return end   -- 그 퀘스트 대화 창이 열려 있는 동안은 계속 보임
   local hold = p.hold or 8
   if #QS.queue > 0 and hold > 6 then hold = 6 end
   local over = try(ui.IsMouseOver, ui)
@@ -391,18 +404,18 @@ local function onDetail()
   cache[id] = e
   e.title = str(try(GetTitleText)) or e.title
   e.obj = str(try(GetObjectiveText)) or e.obj
+  -- 0.2.0: 수락을 누르기 전, 퀘스트 내용 창이 열릴 때 바로 보여 줌
+  if QS.ShowNow(buildAccept(id, e.title, e.obj)) then recent[id] = now(); QS.pin = id end
 end
 local doneAt = {}       -- [questID] = GetTime() (완료 창 중복 거르기)
 local pendingDone      -- 보상 창이 열린 퀘스트 (QUEST_TURNED_IN 이 안 올 때 대비)
 local function pushDone(id)
   if type(id) ~= "number" or id <= 0 then return end
   local t = now()
-  if doneAt[id] and t - doneAt[id] < 5 then return end
-  doneAt[id] = t
   if pendingDone == id then pendingDone = nil end
-  local p = buildDone(id)
-  if not p and isOn() then say("완료: 이야기가 없는 퀘스트예요 (번호 " .. id .. ")") end
-  QS.Enqueue(p)
+  if doneAt[id] and t - doneAt[id] < 120 then return end   -- 보상 창에서 이미 보여 줬으면 다시 안 띄움
+  doneAt[id] = t
+  QS.Enqueue(buildDone(id))
 end
 local function onComplete()
   local id = try(GetQuestID)
@@ -411,7 +424,10 @@ local function onComplete()
   cache[id] = e
   e.title = str(try(GetTitleText)) or e.title
   pendingDone = id
+  -- 0.2.0: 보상을 받기 전, 완료(보상) 창이 열릴 때 바로 보여 줌
+  if QS.ShowNow(buildDone(id)) then doneAt[id] = now(); QS.pin = id end
 end
+local function onFinished() QS.pin = nil end   -- 대화 창이 닫힘: 이제부터 시간이 가고 저절로 사라짐
 -- QUEST_TURNED_IN 이 안 오는 클라이언트 대비: 보상 창이 열렸던 퀘스트가 목록에서 빠지면 완료로 봄
 local function onRemoved(id)
   if id and id == pendingDone then pushDone(id) end
@@ -420,21 +436,17 @@ local function onAccepted(a, b)
   local id = b or a
   if type(id) ~= "number" or id <= 0 then return end
   local t = now()
-  if recent[id] and t - recent[id] < 2 then return end
+  if recent[id] and t - recent[id] < 120 then return end   -- 내용 창에서 이미 보여 줬으면 다시 안 띄움
   recent[id] = t
   local title, obj = gather(id)
   if (not title or not obj) and C_Timer and C_Timer.After then
     C_Timer.After(0.3, function()
       local t2, o2 = gather(id)
-      local p = buildAccept(id, t2, o2)
-      if not p and isOn() then say("수락: 이야기가 없는 퀘스트예요 (번호 " .. id .. ")") end
-      QS.Enqueue(p)
+      QS.Enqueue(buildAccept(id, t2, o2))
     end)
     return
   end
-  local p = buildAccept(id, title, obj)
-  if not p and isOn() then say("수락: 이야기가 없는 퀘스트예요 (번호 " .. id .. ")") end
-  QS.Enqueue(p)
+  QS.Enqueue(buildAccept(id, title, obj))
 end
 local function onTurnedIn(id)
   pushDone(id)
@@ -452,6 +464,7 @@ local handlers = {
   QUEST_COMPLETE = onComplete,
   QUEST_TURNED_IN = onTurnedIn,
   QUEST_REMOVED = onRemoved,
+  QUEST_FINISHED = onFinished,
 }
 
 ui = nil
