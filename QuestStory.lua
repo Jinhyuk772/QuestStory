@@ -1,8 +1,8 @@
--- QuestStory 0.2.0: 퀘스트를 받을 때 / 완료할 때 한국어 세 줄 이야기 팝업.
+-- QuestStory 0.2.1: 퀘스트를 받을 때 / 완료할 때 한국어 세 줄 이야기 팝업.
 -- 일반 프레임만 씀 (보안 프레임·후킹 없음 = taint 없음). OnUpdate 는 팝업이 보일 때만 돈다.
 -- 데이터: Data.lua 의 QuestStoryData (없어도 동작: 제목 + 목표만 보여 줌).
 local ADDON = "QuestStory"
-local VERSION = "0.2.0"
+local VERSION = "0.2.1"
 QuestStory = QuestStory or {}
 local QS = QuestStory
 QS.queue = {}          -- 대기 중인 팝업 (FIFO)
@@ -143,9 +143,14 @@ local function buildAccept(id, title, obj)
   return {kind = "accept", id = id, title = str(title) or "퀘스트", obj = obj, lines = story,
           label = "이야기", tag = "새 퀘스트"}
 end
-local function buildDone(id)
+local NO_STORY = "이 퀘스트는 아직 이야기가 준비되지 않았어요."
+local function buildDone(id, always)
   local d = qdata(id)
-  if not d then return nil end
+  if not d then
+    if not always then return nil end
+    return {kind = "done", id = id, title = titleFor(id) or apiTitle(id) or "퀘스트", lines = {NO_STORY},
+            label = "그 뒤 이야기", tag = "퀘스트 완료"}
+  end
   local lines = copyLines(d.c)
   local nxt
   if d.nx then
@@ -397,8 +402,19 @@ function QS.Push(kind, id, title, obj)
 end
 
 -- ---------- 이벤트 ----------
-local function onDetail()
+local function dialogQuestID()
   local id = try(GetQuestID)
+  if type(id) == "number" and id > 0 then return id end
+  local title = str(try(GetTitleText))
+  if not (title and GetNumQuestLogEntries and GetQuestLogTitle) then return nil end
+  local n = try(GetNumQuestLogEntries)
+  for i = 1, (type(n) == "number" and n or 0) do
+    local t, _, _, isHeader, _, _, _, qid = try(GetQuestLogTitle, i)
+    if not isHeader and t == title and type(qid) == "number" and qid > 0 then return qid end
+  end
+end
+local function onDetail()
+  local id = dialogQuestID()
   if type(id) ~= "number" or id <= 0 then return end
   local e = cache[id] or {}
   cache[id] = e
@@ -418,14 +434,33 @@ local function pushDone(id)
   QS.Enqueue(buildDone(id))
 end
 local function onComplete()
-  local id = try(GetQuestID)
+  local id = dialogQuestID()
   if type(id) ~= "number" or id <= 0 then return end
   local e = cache[id] or {}
   cache[id] = e
   e.title = str(try(GetTitleText)) or e.title
   pendingDone = id
   -- 0.2.0: 보상을 받기 전, 완료(보상) 창이 열릴 때 바로 보여 줌
-  if QS.ShowNow(buildDone(id)) then doneAt[id] = now(); QS.pin = id end
+  if QS.ShowNow(buildDone(id, true)) then doneAt[id] = now(); QS.pin = id end
+end
+-- 0.2.1: 진행 창(목표 확인 · "계속" 단추가 있는 창). 목표를 다 채웠으면 완료 이야기, 아니면 받을 때 이야기를 다시
+local function onProgress()
+  local id = dialogQuestID()
+  if type(id) ~= "number" or id <= 0 then return end
+  local e = cache[id] or {}
+  cache[id] = e
+  e.title = str(try(GetTitleText)) or e.title
+  local p
+  if try(IsQuestCompletable) then
+    pendingDone = id
+    p = buildDone(id, true)
+    if p then doneAt[id] = now() end
+  else
+    local _, obj = gather(id)
+    p = buildAccept(id, e.title, obj)
+    if p then p.tag = "진행 중인 퀘스트"; recent[id] = now() end
+  end
+  if QS.ShowNow(p) then QS.pin = id end
 end
 local function onFinished() QS.pin = nil end   -- 대화 창이 닫힘: 이제부터 시간이 가고 저절로 사라짐
 -- QUEST_TURNED_IN 이 안 오는 클라이언트 대비: 보상 창이 열렸던 퀘스트가 목록에서 빠지면 완료로 봄
@@ -462,6 +497,7 @@ local handlers = {
   QUEST_DETAIL = onDetail,
   QUEST_ACCEPTED = onAccepted,
   QUEST_COMPLETE = onComplete,
+  QUEST_PROGRESS = onProgress,
   QUEST_TURNED_IN = onTurnedIn,
   QUEST_REMOVED = onRemoved,
   QUEST_FINISHED = onFinished,
@@ -494,11 +530,11 @@ end)
 function QS.Status()
   say("버전 " .. VERSION .. " · " .. (isOn() and "켜짐" or "꺼짐") .. " · 이야기 " .. dataCount() .. "개 · 언어 " .. tostring(try(GetLocale)))
   local parts = {}
-  for _, n in ipairs({"QUEST_DETAIL", "QUEST_ACCEPTED", "QUEST_COMPLETE", "QUEST_TURNED_IN", "QUEST_REMOVED"}) do
+  for _, n in ipairs({"QUEST_DETAIL", "QUEST_ACCEPTED", "QUEST_PROGRESS", "QUEST_COMPLETE", "QUEST_TURNED_IN", "QUEST_REMOVED"}) do
     parts[#parts + 1] = n:gsub("QUEST_", "") .. " " .. (seen[n] or 0)
   end
   print("  받은 신호: " .. table.concat(parts, " · "))
-  print("  마지막 신호: " .. (lastEv or "없음"))
+  print("  마지막 신호: " .. (lastEv or "없음") .. " · 대화 창 퀘스트 번호 " .. tostring(try(GetQuestID)) .. " · 제목 " .. tostring(try(GetTitleText)))
   if ui then
     local x, y = try(ui.GetCenter, ui)
     print("  창: " .. (try(ui.IsShown, ui) and "켜짐" or "꺼짐") .. " · 보임 " .. tostring(try(ui.IsVisible, ui) and true or false)
