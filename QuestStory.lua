@@ -3,7 +3,7 @@
 -- 일반 프레임만 씀 (보안 프레임·후킹 없음 = taint 없음). OnUpdate 는 페이드 인·자동 줄이기 때만 돈다.
 -- 데이터: Data.lua 의 QuestStoryData (없어도 동작: 제목 + 목표만 보여 줌).
 local ADDON = "QuestStory"
-local VERSION = "0.3.0"
+local VERSION = "0.3.1"
 QuestStory = QuestStory or {}
 local QS = QuestStory
 QS.history = QS.history or {}   -- 이번 접속에서 본 팝업들 (새것이 뒤, 최대 HIST_MAX)
@@ -26,6 +26,7 @@ local GREEN = {0.45, 0.85, 0.45}
 local WARM = {0.93, 0.9, 0.82}
 local DIM = {0.78, 0.75, 0.68}
 local MUTED = {0.72, 0.62, 0.38}
+local BTN = {1, 0.9, 0.62}
 local FOOT = {0.5, 0.48, 0.44}
 
 local cache = {}       -- [questID] = {title=, obj=}  (QUEST_DETAIL / QUEST_COMPLETE 에서 채움)
@@ -229,33 +230,38 @@ local function build()
   f.dot:ClearAllPoints(); f.dot:SetPoint("LEFT", f, "LEFT", 9, -1)
   f.minTitle = fs(fB, WARM); f.minTitle:SetJustifyV("MIDDLE")
   if f.minTitle.SetWordWrap then f.minTitle:SetWordWrap(false) end
-  f.minTitle:SetWidth(MINW - 22 - 30)
+  f.minTitle:SetWidth(MINW - 22 - 58)
   f.minTitle:ClearAllPoints(); f.minTitle:SetPoint("LEFT", f, "LEFT", 22, -1)
 
   -- 머리 단추 (일반 Button + 글자)
-  local function mkBtn(label, font, point, x, y, onClick)
+  -- 0.3.1: 기호(◀ ▶ – × +)가 한글 글꼴에 없어 단추가 안 보였음 → 한글 글자 + 눈에 보이는 바탕
+  local function mkBtn(label, font, point, x, y, onClick, w)
     local b = CreateFrame("Button", nil, f)
-    b:SetWidth(18); b:SetHeight(18)
+    b:SetWidth(w or 40); b:SetHeight(18)
     b:ClearAllPoints(); b:SetPoint(point, f, point, x, y)
+    if b.SetFrameLevel and f.GetFrameLevel then pcall(b.SetFrameLevel, b, (f:GetFrameLevel() or 1) + 5) end
+    local bgt = b:CreateTexture(nil, "BACKGROUND")
+    bgt:SetAllPoints(b); bgt:SetColorTexture(0.30, 0.24, 0.13, 0.95)
+    b.bg = bgt
     local t = b:CreateFontString(nil, "OVERLAY")
     t:SetFontObject(font); t:SetJustifyH("CENTER")
     t:SetPoint("CENTER", b, "CENTER", 0, 0)
-    t:SetText(label); t:SetTextColor(MUTED[1], MUTED[2], MUTED[3])
+    t:SetText(label); t:SetTextColor(BTN[1], BTN[2], BTN[3])
     b.text = t
     b:SetScript("OnClick", function(self) if not self.off then onClick() end end)
-    b:SetScript("OnEnter", function(self) if not self.off then self.text:SetTextColor(1, 0.95, 0.7) end end)
+    b:SetScript("OnEnter", function(self) if not self.off then self.text:SetTextColor(1, 0.95, 0.7); self.bg:SetColorTexture(0.45, 0.36, 0.2, 1) end end)
     b:SetScript("OnLeave", function(self)
-      local c = self.off and FOOT or MUTED
-      self.text:SetTextColor(c[1], c[2], c[3])
+      local c = self.off and FOOT or BTN
+      self.text:SetTextColor(c[1], c[2], c[3]); self.bg:SetColorTexture(0.30, 0.24, 0.13, 0.95)
     end)
     return b
   end
-  f.btnClose = mkBtn("×", fB, "TOPRIGHT", -6, -8, function() QS.Close() end)
-  f.btnMin = mkBtn("–", fB, "TOPRIGHT", -26, -8, function() QS.SetMin(true) end)
-  f.btnNext = mkBtn("▶", fS, "TOPRIGHT", -48, -8, function() QS.Step(1) end)
-  f.counter:ClearAllPoints(); f.counter:SetPoint("TOPRIGHT", f, "TOPRIGHT", -68, -13)
-  f.btnPrev = mkBtn("◀", fS, "TOPRIGHT", -108, -8, function() QS.Step(-1) end)
-  f.btnMax = mkBtn("+", fB, "RIGHT", -4, -1, function() QS.SetMin(false) end)
+  f.btnClose = mkBtn("닫기", fS, "TOPRIGHT", -8, -9, function() QS.Close() end, 36)
+  f.btnMin = mkBtn("줄이기", fS, "TOPRIGHT", -48, -9, function() QS.SetMin(true) end, 46)
+  f.btnNext = mkBtn("다음", fS, "TOPRIGHT", -106, -9, function() QS.Step(1) end, 36)
+  f.counter:ClearAllPoints(); f.counter:SetPoint("TOPRIGHT", f, "TOPRIGHT", -144, -13)
+  f.btnPrev = mkBtn("이전", fS, "TOPRIGHT", -186, -9, function() QS.Step(-1) end, 36)
+  f.btnMax = mkBtn("펼치기", fS, "RIGHT", -5, 0, function() QS.SetMin(false) end, 46)
 
   f:SetScript("OnMouseUp", function(self, button)
     if dragging or now() - dragEnd < 0.25 then return end   -- 끌고 난 직후의 클릭은 무시
@@ -318,7 +324,7 @@ end
 
 local function setBtnOff(b, off)
   b.off = off and true or false
-  local c = off and FOOT or MUTED
+  local c = off and FOOT or BTN
   b.text:SetTextColor(c[1], c[2], c[3])
 end
 function QS.RefreshCounter()
@@ -361,7 +367,7 @@ local function render(p)
     setText(f.lines[i], l and ("· " .. l) or nil)
   end
   setText(f.nextLine, p.nextTitle and ("다음 이야기: " .. p.nextTitle) or nil)
-  f.footer:SetText("– 줄이기 · × 닫기 · 드래그로 이동")
+  f.footer:SetText("창을 끌면 옮겨져요 · 우클릭하면 줄어들어요")
   f.footer:SetWidth(W - 2 * PAD); f.footer:Show()
   QS.RefreshCounter()
   -- 배치
@@ -688,7 +694,7 @@ local function copyTable(t) local o = {}; for k, v in pairs(t) do o[k] = v end r
 local function help()
   say("명령어 (/qs 또는 /queststory)")
   print("  on / 켜기 - 켜기   off / 끄기 - 끄기 (창도 닫아요)")
-  print("  min / 최소화 - 줄이기·펼치기 (창의 – 단추, 오른쪽 클릭도 같아요)")
+  print("  min / 최소화 - 줄이기·펼치기 (창의 줄이기 단추, 오른쪽 클릭도 같아요)")
   print("  show / 열기 - 지금 이야기를 펼쳐서 다시 보기   last / 마지막 - 마지막 팝업 다시 띄우기")
   print("  auto <5~120> / 자동 <초> - 그 시간 동안 마우스를 안 올리면 저절로 줄이기 (0 = 끄기)")
   print("  move / 이동 - 샘플을 띄워 위치 잡기 (창을 드래그하면 저장돼요)")
