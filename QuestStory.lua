@@ -1,13 +1,13 @@
--- QuestStory 0.3.0: 퀘스트를 받을 때 / 완료할 때 한국어 세 줄 이야기 팝업.
+-- QuestStory 0.4.0: 퀘스트를 받을 때 / 완료할 때 한국어 세 줄 이야기 팝업 + 이전/다음으로 지금 가진 모든 퀘스트 카드 넘겨 보기.
 -- 저절로 사라지지 않음: 줄이기(–) / 닫기(×) 로 직접. 새 퀘스트가 잡히면 줄여 둔 창도 다시 펼쳐짐.
 -- 일반 프레임만 씀 (보안 프레임·후킹 없음 = taint 없음). OnUpdate 는 페이드 인·자동 줄이기 때만 돈다.
 -- 데이터: Data.lua 의 QuestStoryData (없어도 동작: 제목 + 목표만 보여 줌).
 local ADDON = "QuestStory"
-local VERSION = "0.3.2"
+local VERSION = "0.4.0"
 QuestStory = QuestStory or {}
 local QS = QuestStory
-QS.history = QS.history or {}   -- 이번 접속에서 본 팝업들 (새것이 뒤, 최대 HIST_MAX)
-QS.index = 0                    -- 지금 보이는 것의 순번
+QS.history = QS.history or {}   -- recent: 감지된 팝업들 (새것이 앞, 최대 HIST_MAX, 종류+퀘스트 번호로 중복 없음)
+QS.index = 0                    -- 지금 보이는 페이지 (덱 안의 순번, 1 = 맨 앞)
 QS.current = nil                -- 지금 보이는 팝업
 
 local W, PAD = 440, 14
@@ -349,7 +349,8 @@ local function setBtnOff(b, off)
 end
 function QS.RefreshCounter()
   if not ui then return end
-  local n = #QS.history
+  if not QS.current then return end
+  local n = #QS.deck
   -- 0.3.2: 이야기가 하나뿐이어도 이전·다음 단추는 늘 보임(흐리게) — 숨기니 '단추가 없다'로 보였음
   if not isMin() then
     if n < 1 then n = 1 end
@@ -385,13 +386,15 @@ local function render(p)
   f.title:SetText(p.title or "퀘스트"); f.title:SetWidth(W - 2 * PAD); f.title:Show()
   setText(f.objText, p.obj)
   if p.obj then f.objLabel:Show() else f.objLabel:Hide() end
-  if p.lines then f.storyLabel:SetText(p.label or "이야기"); f.storyLabel:Show() else f.storyLabel:Hide() end
+  if p.lines and p.label ~= false then f.storyLabel:SetText(p.label or "이야기"); f.storyLabel:Show() else f.storyLabel:Hide() end
+  local lc = p.muted and MUTED or WARM
   for i = 1, 3 do
     local l = p.lines and p.lines[i]
-    setText(f.lines[i], l and ("· " .. l) or nil)
+    f.lines[i]:SetTextColor(lc[1], lc[2], lc[3])
+    setText(f.lines[i], l and ((p.muted and "" or "· ") .. l) or nil)
   end
   setText(f.nextLine, p.nextTitle and ("다음 이야기: " .. p.nextTitle) or nil)
-  f.footer:SetText("창을 끌면 옮겨져요 · 우클릭하면 줄어들어요")
+  f.footer:SetText("이전 · 다음으로 받은 퀘스트 이야기를 다시 볼 수 있어요")
   f.footer:SetWidth(W - 2 * PAD); f.footer:Show()
   QS.RefreshCounter()
   -- 배치
@@ -407,7 +410,7 @@ local function render(p)
     y = place(f.objText, y) + 10
   end
   if p.lines then
-    y = place(f.storyLabel, y) + 3
+    if p.label ~= false then y = place(f.storyLabel, y) + 3 end
     for i = 1, #p.lines do y = place(f.lines[i], y) + 4 end
     y = y + 4
   end
@@ -458,6 +461,103 @@ function QS.OnUpdate(elapsed)
   ticker()
 end
 
+-- ---------- 덱: 감지된 카드(recent, 새것이 앞) + 지금 퀘스트 로그의 카드 ----------
+QS.deck = {}
+local NO_LOG_STORY = "이 퀘스트는 아직 이야기가 없어요."
+-- 퀘스트 로그의 퀘스트 목록 (순서 그대로). 읽을 수 없으면 nil
+local function logList()
+  local out, seen = {}, {}
+  local function add(qid, title)
+    if type(qid) == "number" and qid > 0 and not seen[qid] then
+      seen[qid] = true
+      out[#out + 1] = {id = qid, title = str(title)}
+    end
+  end
+  if GetNumQuestLogEntries and GetQuestLogTitle then
+    local n = try(GetNumQuestLogEntries)
+    if type(n) == "number" then
+      for i = 1, n do
+        local title, _, _, isHeader, _, _, _, qid = try(GetQuestLogTitle, i)
+        if not isHeader then add(qid, title) end
+      end
+      return out
+    end
+  end
+  local C = C_QuestLog
+  if C and C.GetNumQuestLogEntries and C.GetInfo then
+    local n = try(C.GetNumQuestLogEntries)
+    if type(n) == "number" then
+      for i = 1, n do
+        local info = try(C.GetInfo, i)
+        if type(info) == "table" and not info.isHeader then add(info.questID, info.title) end
+      end
+      return out
+    end
+  end
+  return nil
+end
+local function buildLog(id, title)
+  local d = qdata(id)
+  local story = d and copyLines(d.a)
+  local obj
+  local i = logIndex(id)
+  if i then obj = logObjective(i) end
+  obj = obj or str(cache[id] and cache[id].obj) or apiObjective(id)
+  local p = {kind = "accept", id = id, title = str(title) or titleFor(id) or apiTitle(id) or "퀘스트",
+            obj = obj, lines = story, label = "이야기", tag = "진행 중인 퀘스트", log = true}
+  if not story and not obj then p.lines = {NO_LOG_STORY}; p.muted = true; p.label = false end
+  return p
+end
+local function materialize(e)
+  if not e then return nil end
+  return e.p or buildLog(e.id, e.title)
+end
+local function rebuild()
+  local list = logList()
+  local inLog = {}
+  if list then for _, q in ipairs(list) do inLog[q.id] = true end end
+  local deck, doneSeen, hasAccept = {}, {}, {}
+  for _, p in ipairs(QS.history) do
+    local drop = false
+    if p.kind == "done" then doneSeen[p.id] = true
+    elseif p.kind == "accept" and list and not p.sample and not inLog[p.id] and doneSeen[p.id] then drop = true end   -- 완료 카드가 더 새롭고 로그에서도 빠짐
+    if not drop then
+      deck[#deck + 1] = {kind = p.kind, id = p.id, src = "recent", p = p}
+      if p.kind == "accept" then hasAccept[p.id] = true end
+    end
+  end
+  if list then
+    for _, q in ipairs(list) do
+      if not hasAccept[q.id] then deck[#deck + 1] = {kind = "accept", id = q.id, src = "log", title = q.title} end
+    end
+  end
+  QS.deck = deck
+  return deck
+end
+function QS.Deck() return rebuild() end
+local function keyOf(p) return tostring(p.kind) .. ":" .. tostring(p.id) end
+-- 덱을 다시 만들고 지금 보이는 카드의 자리를 찾음. 카드가 사라졌으면 마지막 유효 페이지로 맞춰 true.
+local function resync()
+  local deck = rebuild()
+  local cur = QS.current
+  if not cur then return false end
+  local k = keyOf(cur)
+  for i, e in ipairs(deck) do
+    if keyOf(e) == k then QS.index = i; return false end
+  end
+  if #deck == 0 then
+    QS.current = nil; QS.index = 0
+    if ui then ui:Hide() end
+    fading = false
+    return false
+  end
+  local i = QS.index or 1
+  if i < 1 then i = 1 elseif i > #deck then i = #deck end
+  QS.index = i
+  QS.current = materialize(deck[i])
+  return true
+end
+
 -- ---------- 기록 · 보이기 ----------
 local function display()
   local ok, err = pcall(render, QS.current)
@@ -472,19 +572,23 @@ local function reveal()
   if not try(ui.IsVisible, ui) then say("창을 띄웠는데 화면에 안 보여요. /qs 상태 를 알려 주세요.") end
 end
 
--- 새 팝업: 기록에 붙이고 바로 펼쳐서 보여 줌 (줄여 뒀거나 닫아 뒀어도)
+local function addRecent(p)
+  local h = QS.history
+  for i = #h, 1, -1 do
+    if h[i].kind == p.kind and h[i].id == p.id then table.remove(h, i) end
+  end
+  table.insert(h, 1, p)
+  while #h > HIST_MAX do table.remove(h) end
+end
+
+-- 새 팝업: 덱 맨 앞(1 페이지)에 놓고 바로 펼쳐서 보여 줌 (줄여 뒀거나 닫아 뒀어도)
 function QS.Present(p)
   if not p or not isOn() then return false end
   local d = initDB()
-  local h = QS.history
-  local last = h[#h]
-  if last and last.kind == p.kind and last.id == p.id and last.tag == p.tag and not p.sample and not last.sample then
-    h[#h] = p      -- 같은 퀘스트 창을 다시 연 것: 새로 쌓지 않고 바꿈
-  else
-    h[#h + 1] = p
-    while #h > HIST_MAX do table.remove(h, 1) end
-  end
-  QS.index = #h
+  addRecent(p)
+  local deck = rebuild()
+  QS.index = 1
+  for i, e in ipairs(deck) do if e.p == p then QS.index = i; break end end
   QS.current = p
   d.min = false
   display()
@@ -496,20 +600,27 @@ function QS.Present(p)
 end
 
 function QS.Goto(i)
-  if type(i) ~= "number" or i < 1 or i > #QS.history then return false end
+  local deck = rebuild()
+  if type(i) ~= "number" or i < 1 or i > #deck then return false end
   QS.index = i
-  QS.current = QS.history[i]
+  QS.current = materialize(deck[i])
   autoT = 0
   display()
   return true
 end
 function QS.Step(dir)
-  return QS.Goto(QS.index + dir)
+  if resync() then display(); return false end
+  if not QS.Goto((QS.index or 0) + dir) then
+    if QS.current then QS.RefreshCounter() end
+    return false
+  end
+  return true
 end
 function QS.SetMin(v)
   local d = initDB()
   d.min = v and true or false
   autoT = 0
+  if not v then resync() end
   if QS.current then display() end
   ticker()
 end
@@ -518,12 +629,31 @@ function QS.Close()
   fading = false
   ticker()
 end
-function QS.Open()   -- 지금 보던 것을 펼쳐서 다시 보여 줌
-  if not (QS.current and ui) then return false end
+function QS.Open()   -- 지금 보던 것(없으면 덱 맨 앞)을 펼쳐서 다시 보여 줌
+  if not ui then return false end
+  resync()
+  if not QS.current then
+    if #QS.deck == 0 then return false end
+    QS.index = 1; QS.current = materialize(QS.deck[1])
+  end
   initDB().min = false
   display()
   reveal()
   return true
+end
+
+-- 퀘스트 로그가 바뀜: 보이는 카드는 그대로 두고 쪽수만 새로 (그 카드의 퀘스트가 로그에서 빠졌으면 유효한 쪽으로)
+local inLogUpdate = false
+function QS.OnLogChanged()
+  if not ui or inLogUpdate then return end
+  inLogUpdate = true
+  local ok, err = pcall(function()
+    local lost = resync()
+    if lost and QS.current and ui:IsShown() then display()
+    elseif QS.current then QS.RefreshCounter() end
+  end)
+  inLogUpdate = false
+  if not ok then say("로그 갱신 중 오류: " .. tostring(err)) end
 end
 
 -- 공개: kind "accept"|"done", 캐시/로그에서 내용을 모아 큐에 넣음
@@ -634,12 +764,26 @@ local function rebuildLast(l)
 end
 -- /reload 뒤: 마지막 이야기를 줄인 상태로 올려 둠 (새로 잡힌 퀘스트가 아니므로 펼치지 않음)
 function QS.RestoreLast()
-  if not ui or #QS.history > 0 or not isOn() then return end
+  if not ui or QS.current or not isOn() then return end
   local d = QuestStoryDB
   local p = d and rebuildLast(d.last)
   if not p then return end
-  QS.history = {p}; QS.index = 1; QS.current = p
+  addRecent(p)
+  rebuild()
+  QS.index = 1; QS.current = p
   d.min = true
+  display()
+  reveal()
+end
+-- 감지 기록이 없어도 퀘스트 로그에 퀘스트가 있으면 첫 카드를 줄인 막대로 올려 둠 (PLAYER_ENTERING_WORLD)
+function QS.Init()
+  if not ui or QS.current or not isOn() then return end
+  QS.RestoreLast()
+  if QS.current then return end
+  local deck = rebuild()
+  if #deck == 0 then return end
+  QS.index = 1; QS.current = materialize(deck[1])
+  initDB().min = true
   display()
   reveal()
 end
@@ -657,7 +801,10 @@ local handlers = {
   QUEST_COMPLETE = onComplete,
   QUEST_PROGRESS = onProgress,
   QUEST_TURNED_IN = onTurnedIn,
-  QUEST_REMOVED = onRemoved,
+  QUEST_REMOVED = function(id) onRemoved(id); QS.OnLogChanged() end,
+  -- 접속 직후엔 퀘스트 로그가 아직 비어 보일 수 있음 → 아무것도 안 떠 있으면 로그가 갱신될 때 막대를 다시 시도
+  QUEST_LOG_UPDATE = function() if not QS.current then QS.Init() else QS.OnLogChanged() end end,
+  PLAYER_ENTERING_WORLD = function() initDB(); QS.Init() end,
   QUEST_FINISHED = onFinished,
 }
 
@@ -678,7 +825,7 @@ local ev = CreateFrame("Frame")
 for name in pairs(handlers) do pcall(ev.RegisterEvent, ev, name) end
 ev:SetScript("OnEvent", function(self, event, a, b, ...)
   seen[event] = (seen[event] or 0) + 1
-  if event:find("^QUEST_") then lastEv = event .. " " .. tostring(a) .. " " .. tostring(b) end
+  if event:find("^QUEST_") and event ~= "QUEST_LOG_UPDATE" then lastEv = event .. " " .. tostring(a) .. " " .. tostring(b) end
   local h = handlers[event]
   if h then
     local ok, err = pcall(h, a, b, ...)
@@ -719,6 +866,7 @@ local function help()
   say("명령어 (/qs 또는 /queststory)")
   print("  on / 켜기 - 켜기   off / 끄기 - 끄기 (창도 닫아요)")
   print("  min / 최소화 - 줄이기·펼치기 (창의 줄이기 단추, 오른쪽 클릭도 같아요)")
+  print("  이전 / 다음 단추 - 지금 가진 모든 퀘스트의 이야기를 넘겨 볼 수 있어요 (새로 잡힌 퀘스트는 맨 앞)")
   print("  show / 열기 - 지금 이야기를 펼쳐서 다시 보기   last / 마지막 - 마지막 팝업 다시 띄우기")
   print("  auto <5~120> / 자동 <초> - 그 시간 동안 마우스를 안 올리면 저절로 줄이기 (0 = 끄기)")
   print("  move / 이동 - 샘플을 띄워 위치 잡기 (창을 드래그하면 저장돼요)")
@@ -754,7 +902,7 @@ SlashCmdList["QUESTSTORY"] = function(msg)
     local p = rebuildLast(l)
     if not (p and QS.Present(p)) then say("다시 보여 줄 내용이 없어요.") end
   elseif cmd == "test" or cmd == "테스트" then
-    if QS.Present(copyTable(SAMPLE_A)) and QS.Present(copyTable(SAMPLE_C)) then QS.Goto(#QS.history - 1) end
+    if QS.Present(copyTable(SAMPLE_A)) and QS.Present(copyTable(SAMPLE_C)) then QS.Goto(2) end
   elseif cmd == "min" or cmd == "최소화" then
     if not QS.current then say("아직 보여 줄 이야기가 없어요."); return end
     QS.SetMin(not isMin())
