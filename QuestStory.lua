@@ -3,7 +3,7 @@
 -- 일반 프레임만 씀 (보안 프레임·후킹 없음 = taint 없음). OnUpdate 는 페이드 인·자동 줄이기 때만 돈다.
 -- 데이터: Data.lua 의 QuestStoryData (없어도 동작: 제목 + 목표만 보여 줌).
 local ADDON = "QuestStory"
-local VERSION = "0.3.1"
+local VERSION = "0.3.2"
 QuestStory = QuestStory or {}
 local QS = QuestStory
 QS.history = QS.history or {}   -- 이번 접속에서 본 팝업들 (새것이 뒤, 최대 HIST_MAX)
@@ -258,9 +258,11 @@ local function build()
   end
   f.btnClose = mkBtn("닫기", fS, "TOPRIGHT", -8, -9, function() QS.Close() end, 36)
   f.btnMin = mkBtn("줄이기", fS, "TOPRIGHT", -48, -9, function() QS.SetMin(true) end, 46)
-  f.btnNext = mkBtn("다음", fS, "TOPRIGHT", -106, -9, function() QS.Step(1) end, 36)
-  f.counter:ClearAllPoints(); f.counter:SetPoint("TOPRIGHT", f, "TOPRIGHT", -144, -13)
-  f.btnPrev = mkBtn("이전", fS, "TOPRIGHT", -186, -9, function() QS.Step(-1) end, 36)
+  f.btnBig = mkBtn("크게", fS, "TOPRIGHT", -98, -9, function() QS.Bump(0.1) end, 36)
+  f.btnSmall = mkBtn("작게", fS, "TOPRIGHT", -138, -9, function() QS.Bump(-0.1) end, 36)
+  f.btnNext = mkBtn("다음", fS, "TOPRIGHT", -184, -9, function() QS.Step(1) end, 36)
+  f.counter:ClearAllPoints(); f.counter:SetPoint("TOPRIGHT", f, "TOPRIGHT", -222, -13)
+  f.btnPrev = mkBtn("이전", fS, "TOPRIGHT", -264, -9, function() QS.Step(-1) end, 36)
   f.btnMax = mkBtn("펼치기", fS, "RIGHT", -5, 0, function() QS.SetMin(false) end, 46)
 
   f:SetScript("OnMouseUp", function(self, button)
@@ -313,6 +315,24 @@ function QS.SavePos()
   initDB().pos = {"TOPRIGHT", "BOTTOMLEFT", r, t}
 end
 
+-- 크게/작게 단추: 창 전체(글자 포함) 크기를 0.1 씩. 오른쪽 위 모서리는 제자리에 둠.
+function QS.Bump(delta)
+  if not ui then return end
+  local d = initDB()
+  local old = try(ui.GetScale, ui)
+  local r, t = try(ui.GetRight, ui), try(ui.GetTop, ui)
+  local n = math.floor(((d.scale or 1) + delta) * 10 + 0.5) / 10
+  if n < 0.6 then n = 0.6 elseif n > 1.6 then n = 1.6 end
+  d.scale = n
+  applyScale()
+  local new = try(ui.GetScale, ui)
+  if type(old) == "number" and type(new) == "number" and new > 0 and type(r) == "number" and type(t) == "number" then
+    r, t = r * old / new, t * old / new
+    ui:ClearAllPoints(); ui:SetPoint("TOPRIGHT", UIParent, "BOTTOMLEFT", r, t)
+    d.pos = {"TOPRIGHT", "BOTTOMLEFT", r, t}
+  end
+end
+
 local function setText(s, text)
   if text then s:SetText(text); s:SetWidth(W - 2 * PAD); s:Show() else s:Hide() end
 end
@@ -330,13 +350,17 @@ end
 function QS.RefreshCounter()
   if not ui then return end
   local n = #QS.history
-  if n > 1 and not isMin() then
-    ui.counter:SetText(QS.index .. "/" .. n); ui.counter:Show()
-    ui.btnPrev:Show(); ui.btnNext:Show()
-    setBtnOff(ui.btnPrev, QS.index <= 1); setBtnOff(ui.btnNext, QS.index >= n)
+  -- 0.3.2: 이야기가 하나뿐이어도 이전·다음 단추는 늘 보임(흐리게) — 숨기니 '단추가 없다'로 보였음
+  if not isMin() then
+    if n < 1 then n = 1 end
+    local i = QS.index or 1
+    if i < 1 then i = 1 end
+    ui.counter:SetText(i .. "/" .. n); ui.counter:Show()
+    ui.btnPrev:Show(); ui.btnNext:Show(); ui.btnSmall:Show(); ui.btnBig:Show()
+    setBtnOff(ui.btnPrev, i <= 1); setBtnOff(ui.btnNext, i >= n)
   else
     ui.counter:SetText(""); ui.counter:Hide()
-    ui.btnPrev:Hide(); ui.btnNext:Hide()
+    ui.btnPrev:Hide(); ui.btnNext:Hide(); ui.btnSmall:Hide(); ui.btnBig:Hide()
   end
 end
 
@@ -348,7 +372,7 @@ local function render(p)
   f.minTitle:SetText(p.title or "퀘스트")
   if isMin() then
     for _, r in ipairs({f.tag, f.counter, f.title, f.objLabel, f.objText, f.storyLabel, f.lines[1], f.lines[2],
-        f.lines[3], f.nextLine, f.footer, f.divider, f.btnMin, f.btnClose, f.btnPrev, f.btnNext}) do r:Hide() end
+        f.lines[3], f.nextLine, f.footer, f.divider, f.btnMin, f.btnClose, f.btnPrev, f.btnNext, f.btnSmall, f.btnBig}) do r:Hide() end
     f.dot:Show(); f.minTitle:Show(); f.btnMax:Show()
     f:SetWidth(MINW); f:SetHeight(MINH)
     return
